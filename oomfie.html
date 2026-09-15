@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oomfie — an unbounded stack write in sys_ipmimgr</title>
+<style>
+  :root {
+    --bg: #0c0c0e;
+    --panel: #141418;
+    --panel-2: #1a1a20;
+    --border: #26262e;
+    --fg: #d8d8de;
+    --muted: #7a7a86;
+    --dim: #55555e;
+    --accent: #ff9b6a;
+    --accent-dim: rgba(255,155,106,0.25);
+    --bad: #ff7b72;
+    --ok: #7ee787;
+    --warn: #d9a23a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--fg);
+    font: 16.5px/1.72 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  main { max-width: 780px; margin: 0 auto; padding: 72px 28px 140px; }
+  .site-nav {
+    display: flex; gap: 22px;
+    margin: 0 0 56px;
+    font-family: var(--mono); font-size: 13px;
+  }
+  .site-nav a {
+    color: var(--muted); text-decoration: none;
+    border-bottom: none;
+    transition: color 0.15s;
+  }
+  .site-nav a:hover { color: var(--fg); }
+  .site-nav a.active { color: var(--accent); }
+  .kicker { font-family: var(--mono); font-size: 12px; letter-spacing: 0.14em;
+            text-transform: uppercase; color: var(--dim); margin-bottom: 20px; }
+  h1 { font-family: var(--serif); font-size: 32px; line-height: 1.22;
+       margin: 0 0 12px; letter-spacing: -0.015em; font-weight: 400; }
+  h1 em { color: var(--muted); font-style: italic; }
+  h1 code { font-size: 28px; background: none; border: none; padding: 0;
+            color: var(--accent); font-family: var(--mono); font-weight: 500; }
+  .byline { color: var(--muted); font-size: 14px; margin: 0 0 48px;
+            font-family: var(--mono); }
+  h2 { font-family: var(--serif); font-size: 22px; font-weight: 400;
+       margin: 60px 0 14px; letter-spacing: -0.01em; }
+  h3 { font-size: 15px; margin: 30px 0 10px; color: var(--accent);
+       font-family: var(--mono); letter-spacing: -0.01em; font-weight: 600; }
+  p { margin: 14px 0; }
+  p.lead { font-size: 18px; line-height: 1.6; color: #e8e8ec; }
+  code, pre { font-family: var(--mono); font-size: 13px; }
+  code { background: var(--panel-2); border: 1px solid var(--border);
+         padding: 1px 5px; border-radius: 3px; color: #e0e0e6;
+         font-size: 12.5px; }
+  pre { background: var(--panel); border: 1px solid var(--border);
+        padding: 16px 18px; border-radius: 5px; overflow-x: auto;
+        color: var(--fg); line-height: 1.6; font-size: 12.5px; }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; }
+  table { width: 100%; border-collapse: collapse; margin: 20px 0;
+          font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 12px;
+           border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px;
+       text-transform: uppercase; letter-spacing: 0.06em; }
+  td.mono { font-family: var(--mono); font-size: 12.5px; color: #c8c8d0; }
+  .dead { color: var(--bad); font-family: var(--mono); font-size: 12.5px; }
+  .live { color: var(--ok); font-family: var(--mono); font-size: 12.5px; }
+  .warn { color: var(--warn); font-family: var(--mono); font-size: 12.5px; }
+  blockquote { margin: 20px 0; padding: 4px 20px; border-left: 2px solid var(--border);
+               color: var(--muted); font-style: italic; font-family: var(--serif);
+               font-size: 17px; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 60px 0 40px; }
+  a { color: var(--accent); text-decoration: none;
+      border-bottom: 1px solid var(--accent-dim); }
+  a:hover { border-bottom-color: var(--accent); }
+  .foot { margin-top: 80px; color: var(--muted); font-size: 13px;
+          border-top: 1px solid var(--border); padding-top: 28px;
+          font-family: var(--mono); line-height: 1.8; }
+  .sig { margin-top: 40px; font-family: var(--serif); font-size: 17px;
+         color: var(--muted); font-style: italic; }
+  .tag { display: inline-block; font-family: var(--mono); font-size: 10.5px;
+         padding: 2px 7px; border-radius: 3px; border: 1px solid var(--border);
+         background: var(--panel-2); color: var(--muted); vertical-align: middle;
+         margin-left: 8px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .tag.bad { color: var(--bad); border-color: #3a1f22; }
+  .tag.ok { color: var(--ok); border-color: #1e3a28; }
+  .tag.warn { color: var(--warn); border-color: #3a2e1a; }
+  .disclaimer { background: #2a1e10; border: 1px solid #4a3a1a;
+                border-left: 3px solid var(--warn); border-radius: 5px;
+                padding: 16px 20px; margin: 24px 0; }
+  .disclaimer strong { color: var(--warn); }
+  .download { display: inline-block; background: var(--panel-2);
+              border: 1px solid var(--accent); color: var(--accent);
+              padding: 12px 24px; border-radius: 5px; font-family: var(--mono);
+              font-size: 14px; margin: 16px 0; text-decoration: none;
+              border-bottom: 1px solid var(--accent); }
+  .download:hover { background: #2a1e15; }
+</style>
+</head>
+<body>
+<main>
+
+<nav class="site-nav">
+  <a href="./">home</a>
+  <a href="./fahrenheit.html">fahrenheit</a>
+  <a href="./oomfie.html" class="active">oomfie</a>
+</nav>
+
+<div class="kicker">Kernel · PS4 13.02 · IPMI</div>
+<h1><code>oomfie</code> — <em>an unbounded stack write in <code>sys_ipmimgr</code></em></h1>
+<p class="byline">bel · <a href="https://jb.0d01.wtf">jb.0d01.wtf</a></p>
+
+<p class="lead">
+  PS4 13.02's IPMI manager — <code>sys_ipmimgr</code>, syscall 622 — has
+  a stack buffer overflow in the create-server handler. The function walks
+  the pending-connect list and writes two <code>uint32</code> values per
+  matching entry into two adjacent 256-byte stack arrays, with no bounds
+  check on the write index. The list has no length cap. With 64 or more
+  queued connect requests, the writes overflow; with 79 or more, the stack
+  canary trips.
+</p>
+
+<p>
+  The overflow is only the surface. The values written come from the
+  pending-connect entries themselves — the <code>(server_id, uid)</code>
+  pair that serves as the identity key for <code>ConnectRequest</code>
+  objects. That pair is propagated by the same function into freshly-
+  allocated <code>ConnectRequest</code> structures. Two objects can end up
+  claiming the same identity, and the free path for
+  <code>ConnectRequest</code> is unguarded. That's where the exploit
+  lives: an identity collision that leads to a use-after-free.
+</p>
+
+<div class="disclaimer">
+  <p>
+    <strong>Before you run the PoC.</strong> The static analysis below is
+    verified against the 13.02 kernel dump. The trigger sequence has
+    <em>not</em> been executed on hardware. The PoC's argument block
+    layout, its command numbers, and its return-value handling are
+    reconstructions from the disassembly — they may not match the actual
+    userspace ABI. On a real console it may fail at the first call, return
+    <code>EINVAL</code> for every command, or panic the kernel. Run it on
+    a console you are prepared to lose.
+  </p>
+  <p>
+    The finding does not depend on the PoC working. The disassembly is the
+    evidence.
+  </p>
+</div>
+
+<h2>The module</h2>
+
+<p>
+  <code>sys_ipmimgr</code> is syscall 622. It dispatches through a large
+  switch in <code>FUN_00f061d0</code>. The switch covers roughly 300
+  commands across the ranges <code>0x000–0x271</code>,
+  <code>0x302–0x372</code>, and <code>0x400–0x520</code>. Two of them
+  matter here:
+</p>
+
+<table>
+  <thead>
+    <tr><th>cmd</th><th>handler</th><th>purpose</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td class="mono">0</td>
+      <td class="mono">FUN_00efb220</td>
+      <td>syscallCreateServer — allocates a server, walks the pending list</td>
+    </tr>
+    <tr>
+      <td class="mono">0x400</td>
+      <td class="mono">FUN_00ef10d0</td>
+      <td>syscallConnectWithWaitServer — appends to the pending list</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  The module's source tree, visible in the log strings, names the files:
+  <code>ipmimgr.c</code>, <code>ipmimgr_create.c</code>,
+  <code>ipmimgr_connect.c</code>, <code>ipmimgr_disconnect.c</code>,
+  <code>ipmimgr_destroy.c</code>, <code>ipmimgr_sync.c</code>,
+  <code>ipmimgr_async.c</code>, <code>ipmimgr_channel.c</code>,
+  <code>ipmimgr_msg_queue.c</code>, <code>ipmimgr_event_queue.c</code>,
+  <code>ipmimgr_eventflag.c</code>, <code>ipmimgr_kid.c</code>,
+  <code>ipmimgr_coredump.c</code>, <code>ipmimgr_debugger.c</code>.
+</p>
+
+<p>The UMA zones it registers — visible as string constants — are:</p>
+
+<pre><code>SceIpmiMgrKidObj            client identifier
+SceIpmiMgrKidName           client identifier name
+SceIpmiMgrEvent             event
+SceIpmiMgrConnectionCB      connection control block
+SceIpmiMgrConnectRequest    pending connect request   ← the object that matters
+SceIpmiMgrConnReqBufCtrl    connect request buffer controller
+SceIpmiMgrChBuf             channel buffer
+SceIpmiMgrChBufUnit         channel buffer unit</code></pre>
+
+<h2>The vulnerable function</h2>
+
+<p>
+  <code>syscallCreateServer</code> (<code>FUN_00efb220</code>) builds a
+  server structure and then iterates the pending-connect list. Its stack
+  frame, from the disassembly of the loop body:
+</p>
+
+<pre><code>array_A   at RBP-0x170, 64 × uint32 = 256 bytes   — ends at RBP-0x70
+array_B   at RBP-0x270, 64 × uint32 = 256 bytes   — ends at RBP-0x170
+local_78  at RBP-0x78, 32 bytes   — internal copy of the server name
+local_58  at RBP-0x58, 24 bytes   — user-supplied name copy
+local_40  at RBP-0x40, 1 byte     — null terminator
+canary    at RBP-0x38, 8 bytes</code></pre>
+
+<p>
+  The two arrays are physically adjacent: <code>array_B</code> ends exactly
+  where <code>array_A</code> begins.
+</p>
+
+<p>The loop that writes them:</p>
+
+<pre><code>uVar12 = 0;
+plVar13 = *(long **)(server_list + 0x38);       // pending-connect list head
+if (plVar13 != 0) {
+    do {
+        ...
+        if (((*(uint *)((long)plVar13 + 0x14) & 0x500) == 0) &&
+            (FUN_00bc6380(plVar13 + 5, local_58, 0x20) == 0)) {   // name match
+            ...
+            *(int *)(RBP - 0x170 + uVar12 * 4) = (int)plVar13[3];
+            *(undefined4 *)(RBP - 0x270 + uVar12 * 4) =
+                 *(undefined4 *)((long)plVar13 + 0x1c);
+            uVar12 = (ulong)((int)uVar12 + 1);    // ← no bounds check
+        }
+        plVar13 = plVar4;
+    } while (plVar4 != 0);
+}</code></pre>
+
+<p>
+  <code>uVar12</code> increments once per matching entry. It is never
+  compared against 64.
+</p>
+
+<h3>What lands where</h3>
+
+<table>
+  <thead>
+    <tr><th>uVar12</th><th>array_A write</th><th>array_B write</th><th>consequence</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="mono">0–63</td><td>in-bounds</td><td>in-bounds</td><td>normal</td></tr>
+    <tr><td class="mono">64</td><td><code>local_78+8</code></td><td><code>array_A[0]</code></td><td>name buffer + array aliasing</td></tr>
+    <tr><td class="mono">72</td><td><code>local_58+8</code></td><td><code>array_A[8]</code></td><td>user name buffer corrupts</td></tr>
+    <tr><td class="mono">76</td><td><code>local_40</code></td><td><code>array_A[12]</code></td><td>null terminator overwritten</td></tr>
+    <tr><td class="mono">78</td><td>padding</td><td><code>array_A[14]</code></td><td>last index before canary</td></tr>
+    <tr><td class="mono">79</td><td>canary low half</td><td><code>array_A[15]</code></td><td>kernel panic on return</td></tr>
+  </tbody>
+</table>
+
+<p>
+  The exploitation window is <strong>N between 64 and 78</strong>. Below 64,
+  no overflow. At 79 or above, the canary trips.
+</p>
+
+<h2>The trigger — no length cap on the pending list</h2>
+
+<p>
+  The list is at <code>server_list + 0x38</code>, a global. Entries are
+  appended by <code>FUN_00ef10d0</code> (cmd <code>0x400</code>). The
+  append path:
+</p>
+
+<pre><code>for (puVar2 = *(undefined8 **)(server_list + 0x38); puVar2 != 0; puVar2 = *puVar2) {
+    if ((*(int *)(puVar2 + 3) == param_2) &&
+        (*(int *)((long)puVar2 + 0x1c) == uid)) {
+        FUN_00ae0450("...ERROR...", 0x44f);   // panic on duplicate
+    }
+}
+// link new entry in
+*(byte *)((long)puVar14 + 0x14) = *(byte *)((long)puVar14 + 0x14) | 1;
+*puVar14 = 0;
+puVar14[1] = *(undefined8 *)(server_list + 0x40);
+**(undefined8 **)(lVar12 + 0x40) = puVar14;
+*(undefined8 **)(server_list + 0x40) = puVar14;
+*(int *)(lVar12 + 0x34) = *(int *)(lVar12 + 0x34) + 1;</code></pre>
+
+<p>
+  The duplicate check panics only if <em>both</em> the server-id field
+  (<code>+0x18</code> of the entry) and the uid field (<code>+0x1c</code>)
+  match an existing entry. Varying the server id bypasses it. The counter
+  at <code>+0x34</code> increments but is never compared to a maximum.
+</p>
+
+<p>
+  <strong>The list has no upper bound.</strong> Its only limit is available
+  kernel memory.
+</p>
+
+<h2>No privilege gate</h2>
+
+<p>
+  The dispatcher <code>FUN_00f061d0</code> has a credential check at the
+  top:
+</p>
+
+<pre><code>if (iVar5 &lt; 0x271) {
+    uVar14 = iVar5 - 0x100;
+    if (uVar14 &lt; 0x34) {
+        // cred check for cmds 0x100..0x133
+    }
+}
+else if ((((iVar5 == 0x271) || (iVar5 == 0x372)) || (iVar5 == 0x473)) &&
+        (...)) {
+    // cred check for those three
+}</code></pre>
+
+<p>
+  <code>cmd=0</code> sets <code>iVar5 = 0</code>. Condition
+  <code>iVar5 &lt; 0x271</code> is true; <code>uVar14 = 0 - 0x100 = 0xFFFFFF00</code>,
+  not <code>&lt; 0x34</code>. Skipped.
+</p>
+
+<p>
+  <code>cmd=0x400</code> sets <code>iVar5 = 1024 &gt; 625</code>. The
+  <code>else if</code> requires <code>0x271</code>, <code>0x372</code>, or
+  <code>0x473</code>. Not matched. Skipped.
+</p>
+
+<p>
+  Both commands bypass the credential check. The only remaining gate is the
+  top-level <code>in_size ≤ 0x40</code> bound applied to all commands.
+</p>
+
+<h2>From stack overflow to use-after-free</h2>
+
+<p>
+  The interesting thing about the overflow is not that it writes past an
+  array. It's <em>what</em> it writes, and where those values end up.
+</p>
+
+<h3>What the values are</h3>
+
+<p>
+  Both values written per iteration come from the pending-connect entry:
+</p>
+
+<pre><code>plVar13[3]                            → the "server id" field of the entry
+*(undefined4 *)((long)plVar13 + 0x1c) → the "uid" field of the entry</code></pre>
+
+<p>
+  These are the same two fields the connect-path lookup uses as its
+  compound key. They are <em>the identity</em> of the ConnectRequest.
+</p>
+
+<h3>Where they go next</h3>
+
+<p>
+  Immediately after the overflow loop, a second loop reads the arrays back
+  and writes their contents into freshly-allocated ConnectRequests:
+</p>
+
+<pre><code>uVar12 = 0;
+do {
+    lVar8 = FUN_00ef74d0();                       // allocate ConnectRequest
+    if (lVar8 == 0) { ... panic ... }
+    *(undefined4 *)(lVar8 + 0x10) = 0x40;
+    *(undefined4 *)(lVar8 + 0x18) = auStack_A[uVar12];   // server id
+    *(undefined4 *)(lVar8 + 0x1c) = auStack_B[uVar12];   // uid
+    FUN_00ef7f10(local_288, lVar8);               // link into server's list
+    uVar12 = uVar12 + 1;
+} while (uVar11 != uVar12);</code></pre>
+
+<p>
+  <code>FUN_00ef74d0</code> allocates from the
+  <code>SceIpmiMgrConnectRequest</code> zone (confirmed: the function loads
+  its zone pointer from a single global, <code>DAT_02f7d630</code>, which is
+  populated at module init).
+</p>
+
+<p>
+  For <code>uVar12 &lt; 64</code>, the array values still hold the correct
+  identity for that entry. For <code>uVar12 ≥ 64</code>, the array slots
+  have been clobbered by the <em>other</em> array's write, and the
+  ConnectRequest gets assigned a different entry's identity.
+</p>
+
+<h3>The free is unguarded</h3>
+
+<p>
+  The free counterpart is <code>FUN_00ef74b0</code>:
+</p>
+
+<pre><code>void FUN_00ef74b0(void *obj) {
+    FUN_00a111b0(_DAT_02f7d630, obj, 0);      // uma_zfree, nothing else
+}</code></pre>
+
+<p>
+  No unlink from the list. No reference count. No state check. The caller
+  is entirely responsible for ensuring the object is unreferenced and
+  unlinked before freeing. Twenty call sites across the module, and every
+  one of them assumes that precondition holds.
+</p>
+
+<h3>The resulting UAF</h3>
+
+<p>
+  Two ConnectRequests on the list now claim the same
+  <code>(server_id, uid)</code> identity. The next time any caller resolves
+  that identity — a connect, a lookup, a disconnect, a session teardown —
+  the walk returns the <em>first</em> matching node, which may not be the
+  one the caller owns. Depending on what the caller does next:
+</p>
+
+<ul>
+  <li>
+    <strong>Free the wrong object.</strong> Caller A frees what it thinks
+    is its ConnectRequest, but the lookup matched B. B is now freed while
+    still linked into C's list. C's next walk dereferences freed memory.
+  </li>
+  <li>
+    <strong>Double-free.</strong> Both A and C later free the object. The
+    second free is a double-free of a UMA object.
+  </li>
+  <li>
+    <strong>State confusion.</strong> A writes a field on the "shared"
+    object, which C reads as a genuine update. Sessions can be hijacked
+    or destroyed by a process that didn't own them.
+  </li>
+</ul>
+
+<p>
+  Which of these three fires depends on which operation the caller
+  performs after the corrupted ConnectRequest is inserted. The eight
+  internal callers of <code>FUN_00ef74b0</code> are the candidates:
+  <code>FUN_00ef10e4</code>, <code>FUN_00ef4260</code>,
+  <code>FUN_00efa000</code>, <code>FUN_00efc840</code>,
+  <code>FUN_00f013f0</code>, <code>FUN_00f030a0</code>,
+  <code>FUN_00f04840</code>, <code>FUN_00f08de0</code>,
+  <code>FUN_00f0a720</code>.
+</p>
+
+<h2>What's verified vs. what isn't</h2>
+
+<table>
+  <thead>
+    <tr><th>Claim</th><th>Confidence</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Two adjacent 256-byte arrays in the create-server stack frame</td><td class="live">high (assembly)</td></tr>
+    <tr><td>Write loop counter has no upper bound</td><td class="live">high (assembly)</td></tr>
+    <tr><td>Pending-connect list append path has no cap</td><td class="live">high (decompilation)</td></tr>
+    <tr><td><code>cmd=0</code> and <code>cmd=0x400</code> bypass the dispatcher cred check</td><td class="live">high (switch structure)</td></tr>
+    <tr><td><code>FUN_00ef74d0</code> allocates from <code>SceIpmiMgrConnectRequest</code></td><td class="live">high (single zone pointer)</td></tr>
+    <tr><td><code>FUN_00ef74b0</code> is a bare <code>uma_zfree</code></td><td class="live">high (two-instruction body)</td></tr>
+    <tr><td>Corrupted fields propagate into ConnectRequest+0x18/+0x1c</td><td class="live">high (second loop reads arrays)</td></tr>
+    <tr><td>Identity collision produces UAF or double-free at a subsequent operation</td><td class="warn">mechanism verified, specific trigger not traced</td></tr>
+    <tr><td>Heap shaping is achievable from userspace</td><td class="bad">no known method</td></tr>
+    <tr><td>The PoC actually reaches the vulnerable code path</td><td class="bad">untested</td></tr>
+  </tbody>
+</table>
+
+<h2>The PoC</h2>
+
+<div class="disclaimer">
+  <p>
+    <strong>Again: this has not been tested.</strong> The argument block
+    layout, the command numbers, and the sequence are reconstructions from
+    the disassembly. The exact userspace ABI of <code>sys_ipmimgr</code> —
+    how the kernel expects the argument block to be shaped, what the server
+    name field actually contains, whether the connect handler accepts the
+    arguments as written — is not confirmed against a running system. On a
+    retail console it may return <code>EINVAL</code> for every call. On a
+    devkit it might do something else. Run it on a console you can afford
+    to lose, ideally with UART attached so a panic is visible.
+  </p>
+  <p>
+    If it does reach the vulnerable path, the conservative setting
+    <code>N_REQUESTS = 72</code> corrupts the neighboring stack locals
+    without touching the canary. <code>N_REQUESTS = 78</code> is the last
+    safe value. Anything at or above 79 trips the canary and panics the
+    kernel.
+  </p>
+  <p>
+    The PoC has seven phases: baseline, queueing, trigger, identity
+    collision stress, server teardown, post-teardown observation, and
+    summary. Phases 1–3 are based on verified disassembly. Phases 4–6
+    are speculative — they attempt to consume the corrupted state, but
+    their exact design is inferred rather than traced.
+  </p>
+</div>
+
+<p>
+  <a class="download" href="ipmi_poc.js" download>Download ipmi_poc.js</a>
+</p>
+
+<p>
+  The script is designed for the <code>chain_poops</code> environment —
+  WebKit primitive already established, JavaScript issuing syscalls via
+  the ROP harness. It will not run from a plain browser page or any
+  sandboxed context. A companion C PoC for a devkit or payload SDK is
+  planned but not yet written.
+</p>
+
+<h3>How to run it</h3>
+
+<p>
+  Load it as <code>ipmi_poc.html</code> with the primitive harness in
+  place. URL parameters override the defaults:
+</p>
+
+<pre><code>?n=72              queue 72, trigger, full phase 4-6
+?n=72&amp;phase4=0     skip the collision stress
+?n=72&amp;phase5=0     skip the teardown
+?n=78              last safe value — expect no panic
+?n=79              canary trip — expect reboot</code></pre>
+
+<p>
+  Run <code>?n=63</code> first as a control — that should complete all
+  phases without a reboot. Then <code>?n=72</code>, then <code>?n=79</code>.
+  If the console reboots at <code>?n=72</code>, the UAF fired from phase 4
+  or 5. If it completes cleanly, the collision didn't happen under those
+  parameters.
+</p>
+
+<h2>Open questions</h2>
+
+<ol>
+  <li>
+    <strong>Which caller of <code>FUN_00ef74b0</code> resolves identity
+    before freeing.</strong> The UAF requires a caller that looks up a
+    ConnectRequest by <code>(server_id, uid)</code> and then frees it. Any
+    of the eight internal callers is a candidate; tracing their lookup
+    paths finds the exact trigger.
+  </li>
+  <li>
+    <strong>Whether the second loop's allocation can be groomed.</strong>
+    The <code>SceIpmiMgrConnectRequest</code> zone is only reachable via
+    the connect path. If it's a fixed-size zone, the freelist is
+    predictable; if it's a malloc-backed zone, the slab geometry matters.
+  </li>
+  <li>
+    <strong>Whether the primitive can be chained.</strong> The UAF is on a
+    ConnectRequest. What gets allocated into the freed slot determines
+    whether the primitive is consumable. A second syscall that allocates a
+    function-pointer-bearing object in the same zone would be ideal.
+  </li>
+  <li>
+    <strong>Whether <code>cmd=0</code> is genuinely unrestricted on
+    retail.</strong> The dispatcher's check skips it, but a higher layer
+    (SceShellCore, the syscall wrapper, a separate credential validator)
+    might intercept it. The static analysis says no gate; a live test would
+    confirm.
+  </li>
+</ol>
+
+<h2>Relationship to other findings</h2>
+
+<p>
+  This is a separate finding from
+  <a href="./fahrenheit.html">Fahrenheit</a>, which covers a UFS mount
+  path superblock-validation issue on the same firmware. The two share one
+  property: both are kernel-side bugs on 13.02, and both require a
+  userspace primitive to be exploited end-to-end. The difference is that
+  Fahrenheit needs a 250 GB USB 3.0 drive to trigger the mount path, while
+  this one needs two syscalls and nothing else.
+</p>
+
+<p>
+  There is also no working userspace primitive on 13.02 for either finding.
+  The WebKit SSV exploit that would have provided one does not fire on this
+  firmware — the JavaScriptCore deserializer's object map was rebased and
+  no longer overflows. That gap is common to both findings and is not
+  solved by either.
+</p>
+
+<h2>Credits</h2>
+
+<p>
+  The disassembly work is mine. The 13.02 kernel dump is a public dump; the
+  string table from the IPMI module was read directly from it. The
+  observation that the second-loop allocation targets
+  <code>ConnectRequest</code> rather than <code>Event</code> came from
+  cross-referencing <code>FUN_00ef74d0</code>'s single zone pointer against
+  the module's UMA-zone string table, and from following the
+  <code>FUN_00ef74b0</code> free path through twenty call sites.
+</p>
+
+<p>
+  To whoever pointed at <code>ConnectRequest</code> in the first place:
+  thank you. That correction turned a stack overflow into a UAF.
+</p>
+
+<div class="sig">— bel</div>
+
+<div class="foot">
+  Ghidra addresses are relative to the 13.02 kernel image base (0 in the
+  dump used for this analysis).<br>
+  Function names are mine; the binaries are stripped.<br>
+  Static analysis only. No hardware verification of the trigger or the
+  PoC has been performed.<br>
+  If you run the PoC and it works, or if it panics, please reach out.
+</div>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fahrenheit — unvalidated UFS superblocks on PS4 13.02</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<main>
+
+<nav class="site-nav">
+  <a href="./">home</a>
+  <a href="./fahrenheit.html" class="active">fahrenheit</a>
+  <a href="./oomfie.html">oomfie</a>
+</nav>
+
+<div class="kicker">Kernel · PS4 13.02 · UFS</div>
+<h1>Fahrenheit — <em>unvalidated UFS superblocks on 13.02</em></h1>
+<p class="byline">bel · <a href="https://jb.0d01.wtf">jb.0d01.wtf</a></p>
+
+<p class="lead">
+  The UFS mount path on 13.02 accepts superblocks that its own validator
+  would reject. The 13.52 validator is fail-open: it runs, its return
+  value is discarded, and execution continues with the unvalidated
+  superblock. On 13.02 the validator call is absent entirely. Both
+  firmwares mount crafted superblocks. The downstream write loop derives
+  its length from fields the arithmetic never bounds-checks. The
+  multiplication wraps.
+</p>
+
+<p>
+  What follows is the diff, the arithmetic, the reachability analysis,
+  and — importantly — the three gaps that keep this from being a
+  jailbreak route. The finding is real. The exploitation path is not
+  complete, and one of the missing pieces is a piece of hardware I don't
+  currently have.
+</p>
+
+<h2>The two functions</h2>
+
+<p>
+  Both firmwares have <code>ffs_mountfs</code> as the UFS filesystem
+  mount entry point. On 13.52 it's at kernel base
+  <code>0xffffffff80000000</code> + <code>0x4e9640</code>
+  (<code>FUN_ffffffff824e9640</code>). On 13.02 it's at the same relative
+  position in a different binary (<code>FUN_00ae9510</code>, base 0 in
+  the dump).
+</p>
+
+<h3>13.52 — fail-open</h3>
+
+<pre><code>LAB_ffffffff824e9bed:
+    iVar26 = FUN_ffffffff824eafc0(lVar21);       // ffs_validate_sblock
+    if (iVar26 != 0) {
+        FUN_ffffffff824e0510("ffs_mount: invalid superblock\n");
+    }
+    // execution continues with the unvalidated superblock</code></pre>
+
+<p>
+  The validator runs. Its return value is logged and discarded. Execution
+  proceeds down the "assume valid" path. This is fail-open: the check is
+  present but ineffective.
+</p>
+
+<h3>13.02 — fail-open by omission</h3>
+
+<pre><code>LAB_00ae98b1:
+    lVar14 = *(long *)(lStack_58 + 0x18);
+    if ((((*(int *)(lVar14 + 0x55c) != 0x19540119) ||
+          (*(ulong *)(lVar14 + 1000) != uVar25)) ||
+         (0x10000 &lt; (int)*(uint *)(lVar14 + 0x30))) ||
+        ((*(uint *)(lVar14 + 0x30) &lt; 0x560 ||
+          (*(int *)(lVar14 + 0x528) &lt; 1))))
+        goto LAB_00ae9890;
+    // five inline checks, then continue</code></pre>
+
+<p>
+  No validator call. The mount path proceeds if five conditions hold. The
+  effect is identical to 13.52.
+</p>
+
+<p>The five 13.02 conditions are:</p>
+
+<ol>
+  <li><code>fs_magic == 0x19540119</code> (UFS2)</li>
+  <li><code>fs_sbsize == expected_for_this_iteration</code></li>
+  <li><code>fs_bsize &lt;= 0x10000</code></li>
+  <li><code>fs_bsize &gt;= 0x560</code></li>
+  <li><code>field_0x528 &gt;= 1</code></li>
+</ol>
+
+<p>Missing relative to 13.52's validator:</p>
+
+<table>
+  <thead>
+    <tr><th>Check</th><th>13.52</th><th>13.02</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>fs_frag ∈ [1,8]</code></td><td class="live">enforced</td><td class="dead">absent</td></tr>
+    <tr><td><code>fs_bsize</code> is power of 2</td><td class="live">enforced</td><td class="dead">absent</td></tr>
+    <tr><td><code>fs_fsize ≥ 0x200</code>, power of 2</td><td class="live">enforced</td><td class="dead">absent</td></tr>
+    <tr><td><code>fs_fsize * fs_frag == fs_bsize</code></td><td class="live">enforced</td><td class="dead">absent</td></tr>
+    <tr><td><code>fs_ncg != 0</code></td><td class="live">enforced</td><td class="dead">absent</td></tr>
+    <tr><td><code>field_0x9c == fragroundup(fs_ncg*16, fs_fsize)</code></td><td class="live">enforced</td><td class="dead">absent</td></tr>
+    <tr><td>~20 more relationship checks</td><td class="live">enforced</td><td class="dead">absent</td></tr>
+  </tbody>
+</table>
+
+<h2>The arithmetic — 32-bit on 13.02, 64-bit on 13.52</h2>
+
+<p>
+  Downstream of the five-check block, <code>ffs_mountfs</code> allocates
+  a summary buffer whose size is derived from <code>field_0x9c</code> and
+  <code>fs_ncg</code>:
+</p>
+
+<h3>13.02</h3>
+
+<pre><code>iVar9  = *(int *)(lVar21 + 0x9c);                     // int32
+iVar24 = (iVar9 + -1 + *(int *)(lVar21 + 0x34)) / *(int *)(lVar21 + 0x34);
+if (0 &lt; *(int *)(lVar21 + 0x524)) {
+    iVar9 = iVar9 + *(int *)(lVar21 + 0x2c) * 4;      // int32 multiply
+}
+local_5c = iVar9 + *(int *)(lVar21 + 0x2c);            // int32 add
+piVar13 = (int *)FUN_00809520((long)(int)local_5c,0x223f8f0,2);</code></pre>
+
+<p>
+  Every operand is <code>int</code> or <code>uint</code>. The multiply
+  <code>fs_ncg * 4</code>, the two adds, and the assignment to
+  <code>local_5c</code> all happen in 32-bit.
+</p>
+
+<h3>13.52</h3>
+
+<pre><code>uVar24 = (ulong)*(uint *)(lVar21 + 0x2c) * 4;          // 64-bit multiply
+...
+piVar18 = (int *)FUN_ffffffff82209520
+                    (uVar24 + (long)iVar11 + (ulong)*(uint *)(lVar21 + 0x2c),
+                     &DAT_ffffffff83c3f8f0, 2);</code></pre>
+
+<p>
+  <code>(ulong)</code> casts on <code>fs_ncg</code> before the multiply,
+  <code>(long)</code> cast on <code>field_0x9c</code>. The whole
+  expression is evaluated in 64-bit. <code>5 * fs_ncg</code> cannot wrap
+  for any 32-bit <code>fs_ncg</code> value.
+</p>
+
+<p>
+  <strong>That's the patch.</strong> Sony widened the arithmetic on 13.52.
+  On 13.02 it still wraps.
+</p>
+
+<h2>The overflow</h2>
+
+<p>
+  Downstream of the allocation, <code>ffs_mountfs</code> reads the
+  superblock in a loop:
+</p>
+
+<pre><code>iVar9 = *(int *)(lVar21 + 0x38);                       // fs_frag
+iVar20 = 0;
+while (true) {
+    local_5c = *(uint *)(lVar21 + 0x30);              // fs_bsize
+    if (iVar24 &lt; iVar9 + iVar20) {
+        local_5c = (iVar24 - iVar20) * *(int *)(lVar21 + 0x34);   // partial
+    }
+    FUN_00800ac0(*(undefined8 *)(lStack_58 + 0x18), piVar13, local_5c);  // bcopy
+    piVar13 = (int *)((long)piVar13 + (long)(int)local_5c);
+    ...
+    iVar20 = iVar20 + iVar9;
+    if (iVar24 &lt;= iVar20) break;
+}</code></pre>
+
+<p>
+  Loop count: <code>ceil(field_0x9c / fs_fsize / fs_frag)</code>.
+  Per-iteration write: <code>fs_bsize</code>. Total bytes written:
+  <code>N * fs_bsize</code>.
+</p>
+
+<p>
+  In a well-formed superblock, <code>fs_bsize == fs_fsize * fs_frag</code>
+  and <code>field_0x9c</code> is a multiple of <code>fs_bsize</code>. The
+  write fits inside the allocation exactly.
+</p>
+
+<p>In a crafted superblock where the relationship is violated — for example,</p>
+
+<table>
+  <thead>
+    <tr><th>field</th><th>value</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="mono">fs_bsize (field_0x30)</td><td class="mono">0x10000</td></tr>
+    <tr><td class="mono">fs_fsize (field_0x34)</td><td class="mono">0x200</td></tr>
+    <tr><td class="mono">fs_frag  (field_0x38)</td><td class="mono">8</td></tr>
+    <tr><td class="mono">field_0x9c</td><td class="mono">0x10000</td></tr>
+    <tr><td class="mono">fs_ncg (field_0x2c)</td><td class="mono">1</td></tr>
+    <tr><td class="mono">field_0x524</td><td class="mono">1</td></tr>
+  </tbody>
+</table>
+
+<p>
+  <code>iVar24 = 0x80</code>, loop count is <code>0x10</code>, total write
+  is <code>0x100000</code> (1 MB). Allocation is
+  <code>0x10000 + 4 + 1 = 0x10005</code> (64 KB). Overflow: approximately
+  960 KB.
+</p>
+
+<p>
+  That's a pile driver, not a clean overflow. Exploitation wants a tighter
+  overrun. The quantity to control is:
+</p>
+
+<pre><code>overrun = N * fs_bsize - (field_0x9c + 5 * fs_ncg)</code></pre>
+
+<h2>Reachability: the six paths to <code>ffs_mountfs</code></h2>
+
+<p>
+  <code>ffs_mountfs</code> is not called directly. It sits behind
+  <code>ffs_mount</code> in the <code>ffs_vfsops</code> table. There are
+  six plausible delivery paths.
+</p>
+
+<h3>1. USB automounter — the intended target <span class="tag warn">undetermined</span></h3>
+
+<p>
+  <code>SceAutoMounterIpc</code> handles device arrival events. On insert,
+  it probes the device for recognizable filesystems and calls
+  <code>nmount(2)</code> with the fstype it detects. If <code>"ufs"</code>
+  or <code>"ffs"</code> is in the probe list, a crafted USB drive reaches
+  <code>ffs_mountfs</code>.
+</p>
+
+<p>
+  Public Celsius research confirms this is the intended trigger: the
+  exploit requires a USB 3.0 drive of 250 GB or larger, connected via the
+  console's external storage feature. The automounter does probe the
+  device for filesystems.
+</p>
+
+<p>
+  The LVD query inside <code>ffs_mountfs</code> fails gracefully (returns
+  -1 through <code>local_8c</code>) rather than aborting. That branch
+  exists specifically to handle a UFS mount where LVD isn't present,
+  which is the USB case.
+</p>
+
+<h3>2. Direct <code>nmount(2)</code> from userspace <span class="tag bad">privileged</span></h3>
+
+<p>
+  If <code>vfs.usermount</code> is enabled, an unprivileged process can
+  call <code>nmount(2)</code> with an arbitrary fstype. Even if enabled,
+  <code>nmount</code> requires a device vnode for the target filesystem.
+  A browser sandbox typically cannot open <code>/dev/da0</code> directly.
+</p>
+
+<h3>3. Boot-time <code>mountroot</code> <span class="tag bad">not runtime</span></h3>
+
+<p>
+  <code>vfs_mountroot.c</code> exists in the binary. If UFS is the root
+  fstype on any configuration, the mount happens at kernel init. You
+  cannot deliver a crafted drive across a power cycle, so this path is
+  not usable.
+</p>
+
+<h3>4. Internal LVD HDD mount <span class="tag bad">requires prior jailbreak</span></h3>
+
+<p>
+  The internal HDD is mounted as UFS2 at boot. Writing to the raw
+  partition requires root-equivalent privileges. Chicken and egg.
+</p>
+
+<h3>5. BD-J triggered mount <span class="tag warn">hardware</span></h3>
+
+<p>
+  If a BD-J application can invoke a syscall that reaches
+  <code>vfs_mount</code>, it may be able to mount a UFS filesystem from a
+  disc. Requires a Blu-ray burner, the BD-J exploit, and confirmation
+  that the BD-J syscall surface exposes <code>mount(2)</code>.
+</p>
+
+<h3>6. Firmware update path <span class="tag bad">no</span></h3>
+
+<p>
+  Sony's update mechanism parses PUP files, not UFS superblocks. Not
+  relevant.
+</p>
+
+<h2>The hardware wall</h2>
+
+<p>
+  Testing USB reachability requires hardware I don't have. The
+  constraints, as far as they can be established from public documentation
+  and the Celsius research:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Requirement</th><th>Reason</th><th>Cost</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>USB 3.0 drive, 250 GB+</td>
+      <td>Automounter rejects smaller or slower devices before probing</td>
+      <td>$30–50 used, $60+ new</td>
+    </tr>
+    <tr>
+      <td>UART access on the target console</td>
+      <td>Without a kernel log, the test produces an ambiguous signal</td>
+      <td>3.3 V TTL adapter ($10) + soldering skill + a console to sacrifice</td>
+    </tr>
+    <tr>
+      <td>Devkit or test kit (alternative to UART)</td>
+      <td>Same reason — need kernel log output</td>
+      <td>$300+ used</td>
+    </tr>
+    <tr>
+      <td>USB protocol analyzer (alternative)</td>
+      <td>Captures SCSI traffic without kernel access</td>
+      <td>$200 USB 2.0, $1000+ USB 3.0</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  I have none of these. The cheapest path is a used USB 3.0 250 GB drive
+  (~$30) paired with a UART adapter (~$10) on a second console. That's
+  still $40 plus the risk of damaging the console during soldering, plus
+  the cost of a console I'm willing to lose.
+</p>
+
+<p>
+  There is a partial workaround: a USB 3.0-capable device emulator could
+  present itself as a 250 GB+ USB 3.0 drive while logging the SCSI
+  commands the PS4 sends. A Raspberry Pi Zero 2 W ($15) can do this, but
+  it's USB 2.0 only, so if the automounter checks the negotiated link
+  speed rather than the descriptor version, the Pi won't be probed
+  either. The check is probably at the driver level, not the descriptor
+  level — the console reports a specific error for USB 2.0 devices —
+  which means the Pi is out.
+</p>
+
+<p>
+  A USB 3.0-capable gadget device is more expensive: a Raspberry Pi
+  CM4/CM5 with a USB 3.0 carrier board is $70–120, an NXP i.MX8 board is
+  $200+, a Total Phase USB 5000 is $1500+. None of these is currently
+  available to me.
+</p>
+
+<h2>What the missing test would establish</h2>
+
+<p>
+  The USB test resolves one question: <strong>is
+  <code>ffs_mountfs</code> reachable from external media on
+  13.02?</strong>
+</p>
+
+<p>Three outcomes:</p>
+
+<ol>
+  <li>
+    <strong>Automounter probes UFS, kernel panics.</strong> Fahrenheit is
+    confirmed reachable. The finding moves from "verified vulnerability"
+    to "verified reachable vulnerability." This is the good outcome.
+  </li>
+  <li>
+    <strong>Automounter probes UFS, no panic.</strong> Either the write
+    landed harmless, or the mount path rejected the image before the
+    write loop. Tunable. The finding is confirmed reachable but the
+    trigger needs refinement.
+  </li>
+  <li>
+    <strong>Automounter does not probe UFS.</strong> Fahrenheit is
+    HDD-only, which means it requires a prior jailbreak to trigger, which
+    makes it circular. The finding remains real but useless as an initial
+    exploit.
+  </li>
+</ol>
+
+<p>
+  All three outcomes are publishable. Outcomes 1 and 2 strengthen the
+  finding. Outcome 3 narrows its scope. None of them are conclusions I
+  can reach without spending money on hardware.
+</p>
+
+<h2>What's verified vs. what isn't</h2>
+
+<table>
+  <thead>
+    <tr><th>Claim</th><th>Confidence</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>13.02 lacks the superblock validator</td><td class="live">high</td></tr>
+    <tr><td>13.52 validator is fail-open (return discarded)</td><td class="live">high</td></tr>
+    <tr><td>13.02 arithmetic is 32-bit; 13.52 is 64-bit</td><td class="live">high (decompiler types)</td></tr>
+    <tr><td>Arithmetic permits a heap overflow</td><td class="live">high</td></tr>
+    <tr><td>Overrun is tunable via three fields</td><td class="live">high</td></tr>
+    <tr><td>13.02 assembly confirms 32-bit widths</td><td class="warn">unverified</td></tr>
+    <tr><td>Summary buffer shares zone with mount structures</td><td class="warn">medium</td></tr>
+    <tr><td>USB automounter tries UFS</td><td class="warn">undetermined</td></tr>
+    <tr><td>Celsius requires 250 GB+ USB 3.0 HDD</td><td class="live">high (public)</td></tr>
+    <tr><td>Adjacent slab object has a hijackable pointer</td><td class="bad">speculative</td></tr>
+    <tr><td>Heap shaping is achievable from userspace</td><td class="bad">no known method</td></tr>
+  </tbody>
+</table>
+
+<h2>The wall</h2>
+
+<p>
+  Even a confirmed overflow doesn't give you a jailbreak. Three things
+  are required for a kernel bug to become a working primitive:
+</p>
+
+<ol>
+  <li>
+    A userspace entry point that runs code inside the browser sandbox and
+    can reach the mount subsystem.
+  </li>
+  <li>
+    Heap shaping before the bug fires, in the exact UMA zone the summary
+    buffer allocates from.
+  </li>
+  <li>
+    A way to consume the corrupted state after, without the kernel
+    detecting it and panicking.
+  </li>
+</ol>
+
+<p>
+  On 13.02 there is no public userspace primitive. The WebKit SSV exploit
+  that <code>slopkit</code> provides does not fire on this firmware. The
+  <code>MemoryMap</code> has been rebased to a HashMap in Safari 17, and
+  duplicate reference identity is preserved correctly.
+</p>
+
+<p>
+  Even with a userspace primitive, the heap shaping problem remains. The
+  UMA zone that <code>ffs_mountfs</code> allocates from is not reachable
+  from any syscall. Shaping it requires a second kernel bug.
+</p>
+
+<blockquote>
+  The kernel finding is real. Two of the three prerequisites for
+  exploitation are missing, and one of the three is behind a hardware
+  paywall I can't currently clear.
+</blockquote>
+
+<h2>What Fahrenheit is, finally</h2>
+
+<p>
+  Fahrenheit is a <em>verified kernel vulnerability</em> on PS4 13.02. It
+  is reachable from the mount subsystem under conditions that require
+  hardware to determine. It is not exploitable without a userspace
+  primitive and a kernel heap shaping primitive, neither of which
+  currently exists on this firmware.
+</p>
+
+<p>Its value is threefold:</p>
+
+<ol>
+  <li>
+    <strong>As a reference finding.</strong> The 13.02/13.52 diff shows
+    Sony widening the allocation arithmetic between those firmwares,
+    which is a data point about their patch cadence on the UFS subsystem.
+  </li>
+  <li>
+    <strong>As a component.</strong> If a userspace primitive ever
+    appears on 13.02, Fahrenheit is one of the pieces you can chain. The
+    hardware gate on the USB test is the only thing blocking confirmation
+    of the trigger.
+  </li>
+  <li>
+    <strong>As documentation.</strong> The <code>ffs_mountfs</code> path
+    on 13.02 is now analysed. Anyone attempting a UFS-based exploit
+    doesn't need to redo this work.
+  </li>
+</ol>
+
+<p>It is not a jailbreak. It was never going to be, on its own.</p>
+
+<h2>The PoC</h2>
+
+<div class="disclaimer">
+  <p>
+    <strong>Read this first.</strong> The script below builds a UFS2
+    image with a crafted superblock for the Fahrenheit trigger path. It
+    has not been tested against a PS4. It has not been verified that the
+    automounter probes UFS on USB at all. Running the resulting drive on
+    a console may produce no observable behaviour, a clean mount failure,
+    or a kernel panic. On a retail console, none of those outcomes are
+    distinguishable without a kernel log.
+  </p>
+  <p>
+    Requirements: a Linux host with <code>mkfs.ufs2</code>, a USB 3.0
+    drive of 250 GB or larger, and either a UART adapter or a USB
+    protocol analyzer attached to the target console. If you have none of
+    the observation channels, running the script tells you nothing.
+  </p>
+</div>
+
+<p>
+  <a class="download" href="poc/setup_usb.sh" download>Download setup_usb.sh</a>
+</p>
+
+<p>
+  Run the valid image first to confirm the automounter probes UFS at all.
+  Then run the crafted image to observe the panic. The script documents
+  each stage in comments.
+</p>
+
+<h2>Credits</h2>
+
+<p>
+  The Ghidra work is mine. The kernel dump is a public 13.02 dump; the
+  13.52 dump used for the diff was provided by others. The Celsius
+  research (originally by bollars) is the public foundation this analysis
+  builds on. The <code>ps4_offsets.js</code> correction of
+  <code>ALLPROC</code> from <code>0x01B28538</code> to
+  <code>0x01CA8538</code> was derived from <code>procinit</code> at
+  <code>FUN_0080e2c0</code> and is unrelated to this finding but came out
+  of the same project.
+</p>
+
+<p>
+  To the people who pushed back on the TCP race hypothesis and the
+  <code>pru_bind</code> retention theory — thank you. Both were refuted
+  and that refutation is what made room to look at the mount path at all.
+</p>
+
+<p>
+  Companion finding on the same firmware:
+  <a href="./oomfie.html">oomfie</a> — an unbounded stack write in
+  <code>sys_ipmimgr</code> that does not require any hardware to trigger.
+</p>
+
+<div class="sig">— bel</div>
+
+<div class="foot">
+  Ghidra addresses are RVAs from the kernel image base
+  (<code>0xffffffff80000000</code> on 13.52, 0 on the 13.02 dump).<br>
+  Function names are mine; the binaries are stripped.<br>
+  Findings verified against the 13.02 dump only. The 13.52 comparison is
+  the diff between two Ghidra decompiler outputs.<br>
+  Reachability from USB remains untested due to hardware constraints.
+</div>
+
+</main>
+</body>
+</html>
