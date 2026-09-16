@@ -2,126 +2,188 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>fn_leak</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fn_leak — SSV probe + pru_bind walk</title>
 <style>
+  :root {
+    --bg: #0c0c0e;
+    --panel: #141418;
+    --panel-2: #1a1a20;
+    --border: #26262e;
+    --fg: #d8d8de;
+    --muted: #7a7a86;
+    --dim: #55555e;
+    --accent: #7cb7ff;
+    --bad: #ff7b72;
+    --ok: #7ee787;
+    --warn: #d9a23a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
   html, body {
     margin: 0; padding: 0;
-    background: #0c0c0e; color: #c9d1d9;
-    font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
-    height: 100%;
-    overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.55 var(--mono);
+    -webkit-font-smoothing: antialiased;
   }
-  #wrap {
+
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
     display: flex;
-    flex-direction: column;
-    height: 100vh;
-    max-width: 100%;
-  }
-  #bar {
-    flex: 0 0 auto;
-    padding: 8px 12px;
-    background: #141418;
-    border-bottom: 1px solid #26262e;
-    display: flex;
-    justify-content: space-between;
     align-items: center;
-    gap: 12px;
+    gap: 16px;
+    flex-wrap: wrap;
   }
-  #title {
-    font-weight: 600;
-    color: #7cb7ff;
+  header .brand {
+    font-size: 15px;
+    color: var(--accent);
     letter-spacing: 0.02em;
   }
-  #state {
-    color: #7a7a86;
-    font-size: 12px;
-    text-align: right;
-    flex: 1;
+  header .url {
+    font-size: 11px;
+    color: var(--dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    flex: 1;
+    min-width: 200px;
   }
-  #state.ok   { color: #7ee787; }
-  #state.warn { color: #d9a23a; }
-  #state.bad  { color: #ff7b72; }
 
-  #out {
-    flex: 1 1 auto;
-    margin: 0;
-    padding: 10px 14px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: break-all;
-    -webkit-overflow-scrolling: touch;
-    background: #0c0c0e;
-    color: #d8d8de;
+  .status-row {
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    gap: 14px;
     font-size: 12px;
   }
-  #out .ok   { color: #7ee787; }
-  #out .warn { color: #d9a23a; }
-  #out .bad  { color: #ff7b72; }
-
-  /* Fullscreen hint for the PS4 browser */
-  #hint {
-    position: fixed;
-    bottom: 6px; right: 10px;
-    color: #55555e;
-    font-size: 11px;
-    pointer-events: none;
+  .status-label {
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 10px;
   }
+  #state {
+    font-weight: 600;
+    color: var(--muted);
+  }
+  #state.warn { color: var(--warn); }
+  #state.ok   { color: var(--ok); }
+  #state.bad  { color: var(--bad); }
+
+  #out {
+    padding: 16px 20px 60px;
+    white-space: pre;
+    overflow-x: auto;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--fg);
+    tab-size: 4;
+  }
+
+  #out .line { display: block; }
+  #out .tag-fail { color: var(--bad); }
+  #out .tag-warn { color: var(--warn); }
+  #out .tag-ok   { color: var(--ok); }
+  #out .tag-dim  { color: var(--dim); }
+
+  .controls {
+    padding: 12px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .controls a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .controls a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
-<div id="wrap">
-  <div id="bar">
-    <span id="title">fn_leak</span>
-    <span id="state">booting…</span>
-  </div>
-  <pre id="out"></pre>
+
+<header>
+  <span class="brand">fn_leak</span>
+  <span class="url" id="url"></span>
+</header>
+
+<div class="status-row">
+  <span class="status-label">state</span>
+  <span id="state">booting</span>
 </div>
-<div id="hint">L1+R1+Options for fullscreen</div>
 
-<script type="module">
-  // Fail loud if the module graph doesn't load. ES module import errors
-  // are silent on the PS4 browser, and a blank screen is useless.
-  window.addEventListener("error", (e) => {
-    const s = document.getElementById("state");
-    if (s) {
-      s.textContent = "load-error: " + (e.message || "unknown");
-      s.className = "bad";
-    }
-  });
-  window.addEventListener("unhandledrejection", (e) => {
-    const s = document.getElementById("state");
-    if (s) {
-      s.textContent = "promise-rejected: " +
-        ((e.reason && e.reason.message) || String(e.reason));
-      s.className = "bad";
-    }
-  });
+<div id="out"></div>
 
-  // The module specifier must match the file in the folder exactly.
-  // If the file is named fn_leak.js, this is fn_leak.js. If you renamed
-  // it, change it here too. The cache-buster query is not needed on the
-  // PS4 browser because it doesn't cache module specifiers, but a fresh
-  // value per load doesn't hurt.
-  import("./fn_leak.js").catch((err) => {
-    const s = document.getElementById("state");
-    const o = document.getElementById("out");
-    if (s) {
-      s.textContent = "import-failed";
-      s.className = "bad";
-    }
-    if (o) {
-      o.textContent = "Failed to load ./fn_leak.js\n\n" +
-        (err && err.message ? err.message : String(err)) +
-        "\n\nCheck that the file exists, that it imports ./core.js, " +
-        "./int64.js and ./ps4_offsets.js, and that those files are in " +
-        "the same directory.";
+<div class="controls">
+  <span>params:</span>
+  <span id="params"></span>
+</div>
+
+<script>
+// Paint the URL and query params before the module runs, so even a
+// hard failure leaves evidence of what was requested.
+(function () {
+  var u = document.getElementById("url");
+  var p = document.getElementById("params");
+  if (u) u.textContent = location.href;
+  if (p) {
+    var q = location.search.replace(/^\?/, "");
+    p.textContent = q ? q : "(none)";
+  }
+})();
+
+// Colourise the log lines as they're written. core.emit writes plain
+// text into #out; this observer re-colours on each mutation without
+// touching the underlying content.
+(function () {
+  var out = document.getElementById("out");
+  if (!out) return;
+
+  function colourise() {
+    var text = out.textContent;
+    var html = text
+      .split("\n")
+      .map(function (line) {
+        var cls = "line";
+        if (/FAIL|THREW|BAD|GIVE-UP|MISMATCH|WEAK|NOOP/i.test(line)) {
+          cls += " tag-fail";
+        } else if (/WARN|MISS|RETRY|DID-NOT/i.test(line)) {
+          cls += " tag-warn";
+        } else if (/OK|PASS|DONE|STORE|FIRED|READY/i.test(line)) {
+          cls += " tag-ok";
+        } else if (/^.{0,3}[A-Z_]+-{1,2}/.test(line) === false && line.length > 0) {
+          cls += " tag-dim";
+        }
+        var esc = line
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+        return '<span class="' + cls + '">' + esc + "</span>";
+      })
+      .join("");
+    out.innerHTML = html;
+  }
+
+  var mo = new MutationObserver(function () {
+    // Only re-colour if the raw text has changed. innerHTML writes
+    // trigger another mutation, so guard against infinite loops.
+    if (out.getAttribute("data-raw") !== out.textContent) {
+      out.setAttribute("data-raw", out.textContent);
+      colourise();
     }
   });
+  mo.observe(out, { childList: true, characterData: true, subtree: true });
+})();
 </script>
+
+<script type="module" src="./fn_leak.js"></script>
 
 </body>
 </html>
